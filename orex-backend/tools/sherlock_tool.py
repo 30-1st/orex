@@ -21,7 +21,7 @@ def run_sherlock(username: str) -> dict:
             ],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=120,
             cwd="/tmp"
         )
 
