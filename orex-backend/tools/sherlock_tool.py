@@ -15,19 +15,13 @@ def run_sherlock(username: str) -> dict:
         result = subprocess.run(
             [
                 "sherlock", clean,
-            "--print-found",
-            "--no-color",
-            "--timeout", "10",
-            "--site",
-            "Instagram", "Twitter", "TikTok", "Facebook",
-            "LinkedIn", "YouTube", "Reddit", "GitHub",
-            "Pinterest", "Snapchat", "Twitch", "Discord",
-            "Spotify", "SoundCloud", "Telegram", "WhatsApp",
-            "Tumblr", "Medium", "Flickr", "Steam",
+                "--print-found",
+                "--no-color",
+                "--timeout", "30",
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
             cwd="/tmp"
         )
 
