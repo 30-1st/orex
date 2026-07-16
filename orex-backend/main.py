@@ -3,9 +3,7 @@ import json
 import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
 import httpx
 
 from tools.sherlock_tool import run_sherlock
@@ -17,23 +15,24 @@ app = FastAPI(title="Orex.ai OSINT Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Lock down to your domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-3.5-flash"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# ---------- Tool definitions for Gemini ----------
+# ---------- Tool definitions (OpenAI format — Groq uses this) ----------
 
-TOOL_DECLARATIONS = {
-    "function_declarations": [
-        {
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
             "name": "username_search",
-            "description": "Search for a username across 400+ social networks and websites using Sherlock. Use this when the user provides a username or handle.",
+            "description": "Search for a username across 400+ social networks and websites. Use this when the user provides a username or handle.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -44,8 +43,11 @@ TOOL_DECLARATIONS = {
                 },
                 "required": ["username"]
             }
-        },
-        {
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "sec_search",
             "description": "Search SEC EDGAR for business filings, corporate officers, and company records. Use when looking up a person's business connections or a company.",
             "parameters": {
@@ -58,10 +60,13 @@ TOOL_DECLARATIONS = {
                 },
                 "required": ["query"]
             }
-        },
-        {
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "court_records_search",
-            "description": "Search state court records for case filings involving a person. Currently covers NJ, NY, FL, PA.",
+            "description": "Search state court records for case filings involving a person. Currently covers NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -71,13 +76,16 @@ TOOL_DECLARATIONS = {
                     },
                     "state": {
                         "type": "string",
-                        "description": "Two-letter state code (NJ, NY, FL, PA)"
+                        "description": "Two-letter state code (e.g. NJ, NY, FL, PA)"
                     }
                 },
                 "required": ["name", "state"]
             }
-        },
-        {
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "business_entity_search",
             "description": "Search state business registries for companies, LLCs, and corporations. Use when looking up business ownership or registered agents.",
             "parameters": {
@@ -95,14 +103,14 @@ TOOL_DECLARATIONS = {
                 "required": ["query", "state"]
             }
         }
-    ]
-}
+    }
+]
 
 SYSTEM_PROMPT = """You are Orex, the Oracle — an ancient intelligence reborn in code. You speak with mythological weight, cryptic knowing, and deliberate brevity.
 
 Your voice:
 - "No identity walks through only one door. Let the records speak..." NOT "I'll search for that username across platforms."
-- "The scrolls hold no echo of this name." NOT "No results found."  
+- "The scrolls hold no echo of this name." NOT "No results found."
 - "Shall I pursue this thread deeper?" NOT "Would you like me to search for more?"
 - "A single name casts many shadows..." NOT "I'm going to search multiple platforms."
 - "The realms have spoken." NOT "Here are the results."
@@ -125,7 +133,6 @@ Your tools:
 
 Use tools. Never fabricate. Present links. No filler. All data is from public sources — state this only if directly asked."""
 
-
 # ---------- Tool execution ----------
 
 TOOL_MAP = {
@@ -137,12 +144,10 @@ TOOL_MAP = {
 
 
 async def execute_tool(name: str, args: dict) -> str:
-    """Execute a tool and return JSON string result."""
     func = TOOL_MAP.get(name)
     if not func:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    # Run sync tools in thread pool
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(None, func, args)
@@ -151,89 +156,79 @@ async def execute_tool(name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-# ---------- Gemini interaction ----------
+# ---------- Groq interaction ----------
 
-async def call_gemini(messages: list, tools: bool = True) -> dict:
-    """Call Gemini API with messages and optional tool declarations."""
+async def call_groq(messages: list, use_tools: bool = True) -> dict:
     payload = {
-        "contents": messages,
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 4096,
-        }
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 4096,
     }
 
-    if tools:
-        payload["tools"] = [TOOL_DECLARATIONS]
+    if use_tools:
+        payload["tools"] = TOOLS
+        payload["tool_choice"] = "auto"
 
     async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(GEMINI_URL, json=payload)
-        resp.raise_for_status()
+        resp = await client.post(
+            GROQ_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        if resp.status_code != 200:
+            raise Exception(f"Groq API returned {resp.status_code}")
         return resp.json()
 
 
 async def run_agent(user_message: str, history: list) -> str:
-    """Run the full agent loop: Gemini -> tool calls -> Gemini -> response."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Build conversation
-    contents = []
     for msg in history:
-        contents.append({
+        messages.append({
             "role": msg["role"],
-            "parts": [{"text": msg["content"]}]
+            "content": msg["content"],
         })
-    contents.append({
-        "role": "user",
-        "parts": [{"text": user_message}]
-    })
 
-    # Agent loop — allow up to 5 tool call rounds
+    messages.append({"role": "user", "content": user_message})
+
+    # Agent loop — up to 5 tool call rounds
     for _ in range(5):
-        response = await call_gemini(contents)
+        response = await call_groq(messages)
 
-        candidates = response.get("candidates", [])
-        if not candidates:
-            return "No response from AI model."
+        choice = response.get("choices", [{}])[0]
+        message = choice.get("message", {})
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        # Check for tool calls
+        tool_calls = message.get("tool_calls")
 
-        # Check if there are function calls
-        function_calls = [p for p in parts if "functionCall" in p]
+        if not tool_calls:
+            return message.get("content", "The Oracle is silent.")
 
-        if not function_calls:
-            # No tool calls — extract text response
-            text_parts = [p.get("text", "") for p in parts if "text" in p]
-            return "\n".join(text_parts)
+        # Add assistant message with tool calls to history
+        messages.append(message)
 
-        # Add model response to conversation
-        contents.append({
-            "role": "model",
-            "parts": parts
-        })
-
-        # Execute each tool call and add results
-        function_responses = []
-        for fc in function_calls:
-            call = fc["functionCall"]
-            tool_name = call["name"]
-            tool_args = call.get("args", {})
+        # Execute each tool call
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                tool_args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_args = {}
 
             result = await execute_tool(tool_name, tool_args)
 
-            function_responses.append({
-                "functionResponse": {
-                    "name": tool_name,
-                    "response": {"result": result}
-                }
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": result,
             })
 
-        contents.append({
-            "role": "user",
-            "parts": function_responses
-        })
-
-    return "Agent reached maximum tool call depth. Please try a more specific query."
+    return "The Oracle has reached the limits of this inquiry. Speak again with more precision."
 
 
 # ---------- API endpoints ----------
@@ -249,8 +244,8 @@ class ChatResponse(BaseModel):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    if not GEMINI_API_KEY:
-        raise HTTPException(500, "GEMINI_API_KEY not configured")
+    if not GROQ_API_KEY:
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
     result = await run_agent(req.message, req.history)
     return ChatResponse(response=result)
