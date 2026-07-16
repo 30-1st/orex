@@ -14,7 +14,7 @@ def run_sherlock(username: str) -> dict:
     try:
         result = subprocess.run(
             [
-                "sherlock", clean,
+                "maigret", clean,
                 "--print-found",
                 "--no-color",
                 "--timeout", "15",
