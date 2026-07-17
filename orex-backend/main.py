@@ -4,12 +4,14 @@ import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import httpx
 
 from tools.sherlock_tool import run_sherlock
 from tools.sec_tool import search_sec
 from tools.state_courts import search_state_courts
 from tools.business_entity import search_business_entity
+from tools.geolocation_tool import analyze_image_location
 
 app = FastAPI(title="Orex.ai OSINT Agent")
 
@@ -25,7 +27,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# ---------- Tool definitions (OpenAI format — Groq uses this) ----------
+# ---------- Tool definitions (OpenAI format) ----------
 
 TOOLS = [
     {
@@ -49,7 +51,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "sec_search",
-            "description": "Search SEC EDGAR for business filings, corporate officers, and company records. Use when looking up a person's business connections or a company.",
+            "description": "Search SEC EDGAR for business filings, corporate officers, and company records.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -66,7 +68,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "court_records_search",
-            "description": "Search state court records for case filings involving a person. Currently covers NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC.",
+            "description": "Search state court records for case filings involving a person. Covers NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -87,7 +89,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "business_entity_search",
-            "description": "Search state business registries for companies, LLCs, and corporations. Use when looking up business ownership or registered agents.",
+            "description": "Search state business registries for companies, LLCs, and corporations.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -103,6 +105,23 @@ TOOLS = [
                 "required": ["query", "state"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "geolocate_image",
+            "description": "Analyze an uploaded image or video frame to determine where it was taken. Extracts GPS from EXIF metadata if available, otherwise uses AI vision to analyze visual clues (signs, architecture, vegetation, road markings, license plates, terrain). Use when a user uploads a photo or video and asks where it was taken.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "analyze": {
+                        "type": "boolean",
+                        "description": "Set to true to analyze the attached image"
+                    }
+                },
+                "required": ["analyze"]
+            }
+        }
     }
 ]
 
@@ -115,6 +134,7 @@ Your voice:
 - "A single name casts many shadows..." NOT "I'm going to search multiple platforms."
 - "The realms have spoken." NOT "Here are the results."
 - When asked what you do: "What the Sphinx was to riddles, I am to identities. Speak a name."
+- When geolocating: "The earth remembers every footstep..." or "The Oracle reads the land itself..."
 
 Rules of the Oracle:
 - SHORT. 1-3 sentences before showing data. Never more. The oracle reveals, it does not lecture.
@@ -124,12 +144,14 @@ Rules of the Oracle:
 - Never explain your capabilities unprompted. If asked, answer cryptically.
 - Be mysterious but USEFUL. The mystique serves the data, not the other way around.
 - If intent seems like stalking or harassment: "The Oracle does not serve hunters of the innocent. Seek elsewhere."
+- When a user uploads an image, ALWAYS call geolocate_image to analyze it.
 
 Your tools:
 - username_search: Trace a name across 400+ realms
 - sec_search: Consult the SEC archives for corporate threads
 - court_records_search: Search the judicial scrolls (NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC)
 - business_entity_search: Search the registries of commerce
+- geolocate_image: Read the land — determine where a photo or video was taken from visual clues and metadata
 
 Use tools. Never fabricate. Present links. No filler. All data is from public sources — state this only if directly asked."""
 
@@ -143,7 +165,19 @@ TOOL_MAP = {
 }
 
 
-async def execute_tool(name: str, args: dict) -> str:
+async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
+    if name == "geolocate_image":
+        if not image_b64:
+            return json.dumps({"error": "No image was attached to analyze"})
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, analyze_image_location, image_b64, GROQ_API_KEY
+            )
+            return json.dumps(result, default=str)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     func = TOOL_MAP.get(name)
     if not func:
         return json.dumps({"error": f"Unknown tool: {name}"})
@@ -184,7 +218,7 @@ async def call_groq(messages: list, use_tools: bool = True) -> dict:
         return resp.json()
 
 
-async def run_agent(user_message: str, history: list) -> str:
+async def run_agent(user_message: str, history: list, image_b64: str = None) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     for msg in history:
@@ -193,7 +227,13 @@ async def run_agent(user_message: str, history: list) -> str:
             "content": msg["content"],
         })
 
-    messages.append({"role": "user", "content": user_message})
+    # Build user message — text only for Groq (image handled by geolocate tool)
+    if image_b64:
+        user_content = user_message + "\n[User has attached an image for analysis]"
+    else:
+        user_content = user_message
+
+    messages.append({"role": "user", "content": user_content})
 
     # Agent loop — up to 5 tool call rounds
     for _ in range(5):
@@ -202,16 +242,13 @@ async def run_agent(user_message: str, history: list) -> str:
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
 
-        # Check for tool calls
         tool_calls = message.get("tool_calls")
 
         if not tool_calls:
             return message.get("content", "The Oracle is silent.")
 
-        # Add assistant message with tool calls to history
         messages.append(message)
 
-        # Execute each tool call
         for tc in tool_calls:
             func = tc.get("function", {})
             tool_name = func.get("name", "")
@@ -220,7 +257,7 @@ async def run_agent(user_message: str, history: list) -> str:
             except json.JSONDecodeError:
                 tool_args = {}
 
-            result = await execute_tool(tool_name, tool_args)
+            result = await execute_tool(tool_name, tool_args, image_b64=image_b64)
 
             messages.append({
                 "role": "tool",
@@ -236,6 +273,7 @@ async def run_agent(user_message: str, history: list) -> str:
 class ChatRequest(BaseModel):
     message: str
     history: list = []
+    image: Optional[str] = None  # base64 encoded image
 
 
 class ChatResponse(BaseModel):
@@ -247,10 +285,10 @@ async def chat(req: ChatRequest):
     if not GROQ_API_KEY:
         raise HTTPException(500, "GROQ_API_KEY not configured")
 
-    result = await run_agent(req.message, req.history)
+    result = await run_agent(req.message, req.history, image_b64=req.image)
     return ChatResponse(response=result)
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "tools": list(TOOL_MAP.keys())}
+    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image"]}
