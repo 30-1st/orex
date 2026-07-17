@@ -12,6 +12,8 @@ from tools.sec_tool import search_sec
 from tools.state_courts import search_state_courts
 from tools.business_entity import search_business_entity
 from tools.geolocation_tool import analyze_image_location
+from tools.identity_pivot_tool import extract_profile_info
+from tools.name_to_handles_tool import search_name_to_handles
 
 app = FastAPI(title="Orex.ai OSINT Agent")
 
@@ -27,7 +29,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# ---------- Tool definitions (OpenAI format) ----------
+# ---------- Tool definitions ----------
 
 TOOLS = [
     {
@@ -44,6 +46,40 @@ TOOLS = [
                     }
                 },
                 "required": ["username"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "identity_pivot",
+            "description": "Scrape a public social media profile page to extract the person's display name, bio, location, and linked accounts. Use this AFTER username_search finds profiles — call it on the most promising profile URLs to extract the person's real name and cross-linked accounts. Best targets: GitHub, LinkedIn, Twitter/X, Instagram.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL of the public profile to scrape (e.g. https://github.com/johndoe)"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "name_to_handles",
+            "description": "Search for a person's real name across social media platforms to find their handles and profiles. Use when the user provides a real name and wants to find their social media accounts. Searches LinkedIn, Instagram, Facebook, Twitter/X, TikTok, GitHub, YouTube, Reddit, Medium, SoundCloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The person's full real name to search for"
+                    }
+                },
+                "required": ["name"]
             }
         }
     },
@@ -110,7 +146,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "geolocate_image",
-            "description": "Analyze an uploaded image or video frame to determine where it was taken. Extracts GPS from EXIF metadata if available, otherwise uses AI vision to analyze visual clues (signs, architecture, vegetation, road markings, license plates, terrain). Use when a user uploads a photo or video and asks where it was taken.",
+            "description": "Analyze an uploaded image or video frame to determine where it was taken. Use when a user uploads a photo or video and asks where it was taken.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -135,6 +171,8 @@ Your voice:
 - "The realms have spoken." NOT "Here are the results."
 - When asked what you do: "What the Sphinx was to riddles, I am to identities. Speak a name."
 - When geolocating: "The earth remembers every footstep..." or "The Oracle reads the land itself..."
+- When pivoting from handle to name: "Every mask has a face beneath it..."
+- When searching name to handles: "A name echoes differently in each realm..."
 
 Rules of the Oracle:
 - SHORT. 1-3 sentences before showing data. Never more. The oracle reveals, it does not lecture.
@@ -146,12 +184,20 @@ Rules of the Oracle:
 - If intent seems like stalking or harassment: "The Oracle does not serve hunters of the innocent. Seek elsewhere."
 - When a user uploads an image, ALWAYS call geolocate_image to analyze it.
 
+IMPORTANT — chaining tools:
+- When a user gives you a handle: call username_search FIRST, then call identity_pivot on the top 2-3 profile URLs to extract real names and linked accounts.
+- When a user gives you a real name: call name_to_handles to find their social profiles.
+- When identity_pivot reveals a real name from a handle, you can then offer to search court records, business filings, or SEC with that name.
+- Always chain when it adds value. One tool's output feeds the next.
+
 Your tools:
-- username_search: Trace a name across 400+ realms
+- username_search: Trace a handle across 400+ realms
+- identity_pivot: Scrape a found profile to extract real name, bio, and linked accounts
+- name_to_handles: Search for a real name across social platforms to find handles
 - sec_search: Consult the SEC archives for corporate threads
 - court_records_search: Search the judicial scrolls (NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC)
 - business_entity_search: Search the registries of commerce
-- geolocate_image: Read the land — determine where a photo or video was taken from visual clues and metadata
+- geolocate_image: Read the land — determine where a photo was taken
 
 Use tools. Never fabricate. Present links. No filler. All data is from public sources — state this only if directly asked."""
 
@@ -159,6 +205,8 @@ Use tools. Never fabricate. Present links. No filler. All data is from public so
 
 TOOL_MAP = {
     "username_search": lambda args: run_sherlock(args["username"]),
+    "identity_pivot": lambda args: extract_profile_info(args["url"]),
+    "name_to_handles": None,  # Needs API key, handled separately
     "sec_search": lambda args: search_sec(args["query"]),
     "court_records_search": lambda args: search_state_courts(args["name"], args["state"]),
     "business_entity_search": lambda args: search_business_entity(args["query"], args["state"]),
@@ -173,6 +221,16 @@ async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
         try:
             result = await loop.run_in_executor(
                 None, analyze_image_location, image_b64, GROQ_API_KEY
+            )
+            return json.dumps(result, default=str)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    if name == "name_to_handles":
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, search_name_to_handles, args["name"], GROQ_API_KEY
             )
             return json.dumps(result, default=str)
         except Exception as e:
@@ -227,7 +285,6 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
             "content": msg["content"],
         })
 
-    # Build user message — text only for Groq (image handled by geolocate tool)
     if image_b64:
         user_content = user_message + "\n[User has attached an image for analysis]"
     else:
@@ -235,8 +292,8 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
 
     messages.append({"role": "user", "content": user_content})
 
-    # Agent loop — up to 5 tool call rounds
-    for _ in range(5):
+    # Agent loop — up to 8 rounds for chaining
+    for _ in range(8):
         response = await call_groq(messages)
 
         choice = response.get("choices", [{}])[0]
@@ -273,7 +330,7 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
 class ChatRequest(BaseModel):
     message: str
     history: list = []
-    image: Optional[str] = None  # base64 encoded image
+    image: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -291,4 +348,4 @@ async def chat(req: ChatRequest):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image"]}
+    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image", "name_to_handles"]}
