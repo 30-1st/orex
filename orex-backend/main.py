@@ -16,6 +16,7 @@ from tools.identity_pivot_tool import extract_profile_info
 from tools.name_to_handles_tool import search_name_to_handles
 from tools.deep_investigate_tool import deep_investigate
 from tools.instagram_scraper_tool import scrape_instagram_deep
+from tools.web_search_tool import web_search
 
 app = FastAPI(title="Orex.ai OSINT Agent")
 
@@ -67,6 +68,23 @@ def _get_vision_key():
 # ---------- Tool definitions ----------
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information about any person, topic, or event. Use this BEFORE answering 'who is' questions about people you don't recognize, or when you need current/recent information your training data may not have.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -282,11 +300,13 @@ Rules of the Oracle:
 - When a user uploads an image, ALWAYS call geolocate_image to analyze it.
 
 KNOWLEDGE FIRST:
-- If the user asks "who is [famous person]" — answer from your own knowledge first. You know who public figures are. Give a brief, oracle-voiced summary, then offer: "Shall I trace their digital footprint across the realms?"
-- Only call tools when the user wants to FIND someone's accounts, profiles, records, or identity — not when they want to LEARN about someone.
-- "who is mia khalifa" → answer from knowledge. "find mia khalifa's socials" → call tools.
-- If you don't recognize the name, say so briefly and AUTOMATICALLY pivot to tools: "This name is not inscribed in the Oracle's memory. Let me search the realms..." — then call name_to_handles or username_search. Never just say "I don't know" and stop.
-- "who is behind @darknight" → call tools (they want to unmask). "who is elon musk" → answer from knowledge (they want information).
+- If the user asks "who is [person]" and you know them — answer briefly in Oracle voice, then offer to trace their digital footprint.
+- If the user asks "who is [person]" and you DON'T recognize them — call web_search FIRST to learn who they are. Then answer with what the web reveals, and offer OSINT tools: "The web speaks of this soul. Shall I trace their presence across the realms?"
+- "who is mia khalifa" → you know her, answer from knowledge.
+- "who is sophie rain" → you don't know her, call web_search("who is Sophie Rain"), then answer.
+- "find @sophieraiin" → skip web_search, go straight to username_search.
+- web_search is also useful when you need to verify or update information mid-investigation.
+- If you don't recognize the name, NEVER just say "I don't know" and stop. Search first, then speak.
 
 TOOL DISCIPLINE:
 - ONE query = ONE tool call by default. Run the single most relevant tool, present what you found, then stop.
@@ -326,6 +346,7 @@ Your tools:
 - court_records_search: Search the judicial scrolls (12 east coast states + DC)
 - business_entity_search: Search the registries of commerce
 - geolocate_image: Read the land — determine where a photo was taken
+- web_search: Consult the living web for current knowledge about any person, topic, or event
 
 Use tools. Never fabricate. No filler. All data is from public sources — state this only if directly asked.
 
@@ -370,6 +391,7 @@ FAILSAFE RULES — the Oracle does not stumble:
 # ---------- Tool execution ----------
 
 TOOL_MAP = {
+    "web_search": lambda args: web_search(args["query"]),
     "username_search": lambda args: run_sherlock(args["username"]),
     "identity_pivot": lambda args: extract_profile_info(args["url"]),
     "instagram_deep_scrape": lambda args: scrape_instagram_deep(args["username"]),
