@@ -557,11 +557,12 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
 
             if "<function=" in content:
                 import re
-                match = re.search(r'<function=(\w+)>(.*?)</function>', content)
+                match = re.search(r'<function=(\w+)>(.*?)</function>|<function=(\w+)(\{.*?\})</function>', content)
                 if match:
-                    tool_name = match.group(1)
+                    tool_name = match.group(1) or match.group(3)
+                    raw_args = match.group(2) or match.group(4)
                     try:
-                        tool_args = json.loads(match.group(2))
+                        tool_args = json.loads(raw_args)
                     except json.JSONDecodeError:
                         tool_args = {}
 
