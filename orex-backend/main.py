@@ -488,6 +488,8 @@ async def call_llm(messages: list, use_tools: bool = True) -> dict:
                 if resp.status_code == 200:
                     return resp.json()
 
+                print(f"OREX PROVIDER {provider['name']}: {resp.status_code} - {resp.text[:500]}")
+
                 # Rate limited or server error — try next provider
                 if resp.status_code in (429, 500, 502, 503, 504):
                     last_error = f"{provider['name']} returned {resp.status_code}"
