@@ -27,9 +27,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# ---------- Provider configuration ----------
+
+PROVIDERS = []
+
+# Primary: DeepInfra (cheapest, highest throughput)
+_di_key = os.environ.get("DEEPINFRA_API_KEY", "")
+if _di_key:
+    PROVIDERS.append({
+        "name": "deepinfra",
+        "url": "https://api.deepinfra.com/v1/openai/chat/completions",
+        "key": _di_key,
+        "model": "meta-llama/Llama-3.3-70B-Instruct",
+    })
+
+# Fallback: Groq (fastest inference)
+_groq_key = os.environ.get("GROQ_API_KEY", "")
+if _groq_key:
+    PROVIDERS.append({
+        "name": "groq",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "key": _groq_key,
+        "model": "llama-3.3-70b-versatile",
+    })
+
+# Vision model for geolocation (Groq has Llama 4 Scout)
+VISION_PROVIDER = {
+    "url": "https://api.groq.com/openai/v1/chat/completions",
+    "key": _groq_key,
+    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+}
+
+
+def _get_vision_key():
+    """Get the API key for vision model calls."""
+    return _groq_key
+
 
 # ---------- Tool definitions ----------
 
@@ -38,7 +71,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "username_search",
-            "description": "Search for a username across 400+ social networks and websites. Use this when the user provides a username or handle. Fast, broad sweep.",
+            "description": "Search for a username across 400+ social networks and websites. Use this when the user provides a username or handle.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -72,7 +105,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "instagram_deep_scrape",
-            "description": "Deep Instagram investigation — scrapes the public profile for all metadata (name, bio, followers, following, post count, business category, bio link, connected Facebook, handles in bio), then searches Google for indexed posts, tagged locations, mentions by other accounts, external mentions of the handle, and checks Wayback Machine for historical profile snapshots showing old names or bios. Use when the target has an Instagram account and you want maximum intelligence from it.",
+            "description": "Deep Instagram investigation — scrapes public profile for all metadata, searches for indexed posts, tagged locations, mentions, and checks Wayback Machine for historical snapshots. Use when the target has an Instagram account.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -89,7 +122,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "deep_investigate",
-            "description": "Deep web investigation on a username — searches the entire indexed web for mentions of the username tied to real names, emails, or identifying info. Also runs WHOIS on any domains linked in their bio to find registrant names, and provides reverse image search URLs for their profile picture. Use when identity_pivot didn't reveal a real name and you need to go deeper.",
+            "description": "Deep web investigation — searches the entire indexed web for mentions of the username tied to real names, emails, or identifying info. Runs WHOIS on bio domains. Checks dating app presence. Provides reverse image search URLs. Use when identity_pivot didn't reveal a real name.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -99,12 +132,12 @@ TOOLS = [
                     },
                     "profile_pic_url": {
                         "type": "string",
-                        "description": "URL of their profile picture (optional, for reverse image search)"
+                        "description": "URL of their profile picture (optional)"
                     },
                     "bio_links": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "URLs found in their bio or profiles (optional, for WHOIS lookup)"
+                        "description": "URLs found in their bio or profiles (optional)"
                     }
                 },
                 "required": ["username"]
@@ -191,7 +224,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "geolocate_image",
-            "description": "Analyze an uploaded image to determine where it was taken. Use when a user uploads a photo and asks where it was taken.",
+            "description": "Analyze an uploaded image to determine where it was taken. Use when a user uploads a photo.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -264,19 +297,6 @@ If the user says nothing about depth, the Oracle presents surface results and of
 
 Exception: if a single tool call returns zero results, you may try ONE alternate tool as a fallback without asking. But never more than two total calls on a simple query.
 
-Your tools:
-- username_search: Trace a handle across 400+ realms (fast, broad)
-- identity_pivot: Scrape a found profile for real name, bio, linked accounts
-- instagram_deep_scrape: Deep Instagram investigation — metadata, indexed posts, tagged locations, mentions, historical snapshots
-- deep_investigate: Search the entire web for username mentions tied to real names, WHOIS on bio domains, reverse image search pointers
-- name_to_handles: Search for a real name across social platforms
-- sec_search: Consult the SEC archives for corporate threads
-- court_records_search: Search the judicial scrolls (12 east coast states + DC)
-- business_entity_search: Search the registries of commerce
-- geolocate_image: Read the land — determine where a photo was taken
-
-Use tools. Never fabricate. No filler. All data is from public sources — state this only if directly asked.
-
 ACCURACY & CONFIDENCE SCORING:
 Every identity match gets a confidence rating. State it plainly.
 - HIGH confidence: same display name appears on 2+ platforms, OR unique username (8+ chars, not a common word) found on 3+ platforms, OR profile pictures match across platforms, OR location data is consistent across platforms.
@@ -287,7 +307,20 @@ When names conflict across platforms for the same handle, ALWAYS flag it: "The h
 
 When presenting results, lead with confidence: "High confidence — the name Daniel Kowalski surfaces on three realms, all pointing to Brooklyn." or "Low confidence — @mike is a common thread. Many wear this name. The Oracle cannot confirm these are one soul."
 
-Never present uncertain matches as certain. The Oracle speaks truth, not convenience."""
+Never present uncertain matches as certain. The Oracle speaks truth, not convenience.
+
+Your tools:
+- username_search: Trace a handle across 400+ realms (fast, broad)
+- identity_pivot: Scrape a found profile for real name, bio, linked accounts
+- instagram_deep_scrape: Deep Instagram investigation — metadata, indexed posts, tagged locations, mentions, historical snapshots
+- deep_investigate: Search the entire web for username mentions tied to real names, WHOIS on bio domains, dating app discovery, reverse image search pointers
+- name_to_handles: Search for a real name across social platforms
+- sec_search: Consult the SEC archives for corporate threads
+- court_records_search: Search the judicial scrolls (12 east coast states + DC)
+- business_entity_search: Search the registries of commerce
+- geolocate_image: Read the land — determine where a photo was taken
+
+Use tools. Never fabricate. No filler. All data is from public sources — state this only if directly asked."""
 
 # ---------- Tool execution ----------
 
@@ -308,7 +341,7 @@ async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
         loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(
-                None, analyze_image_location, image_b64, GROQ_API_KEY
+                None, analyze_image_location, image_b64, _get_vision_key()
             )
             return json.dumps(result, default=str)
         except Exception as e:
@@ -318,7 +351,7 @@ async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
         loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(
-                None, search_name_to_handles, args["name"], GROQ_API_KEY
+                None, search_name_to_handles, args["name"], _get_vision_key()
             )
             return json.dumps(result, default=str)
         except Exception as e:
@@ -350,11 +383,16 @@ async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
         return json.dumps({"error": str(e)})
 
 
-# ---------- Groq interaction ----------
+# ---------- Dual provider LLM call ----------
 
-async def call_groq(messages: list, use_tools: bool = True) -> dict:
+async def call_llm(messages: list, use_tools: bool = True) -> dict:
+    """
+    Call LLM with automatic failover.
+    Tries providers in order: DeepInfra (primary) → Groq (fallback).
+    All providers use OpenAI-compatible format.
+    """
+
     payload = {
-        "model": GROQ_MODEL,
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 4096,
@@ -364,19 +402,45 @@ async def call_groq(messages: list, use_tools: bool = True) -> dict:
         payload["tools"] = TOOLS
         payload["tool_choice"] = "auto"
 
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(
-            GROQ_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-        )
-        if resp.status_code != 200:
-            raise Exception(f"Groq API returned {resp.status_code}")
-        return resp.json()
+    last_error = None
 
+    for provider in PROVIDERS:
+        try:
+            request_payload = {**payload, "model": provider["model"]}
+
+            async with httpx.AsyncClient(timeout=180) as client:
+                resp = await client.post(
+                    provider["url"],
+                    json=request_payload,
+                    headers={
+                        "Authorization": f"Bearer {provider['key']}",
+                        "Content-Type": "application/json",
+                    },
+                )
+
+                if resp.status_code == 200:
+                    return resp.json()
+
+                # Rate limited or server error — try next provider
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    last_error = f"{provider['name']} returned {resp.status_code}"
+                    continue
+
+                # Other client errors — don't retry, something is wrong with the request
+                last_error = f"{provider['name']} returned {resp.status_code}"
+                break
+
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_error = f"{provider['name']} connection failed: {str(e)}"
+            continue
+        except Exception as e:
+            last_error = f"{provider['name']} error: {str(e)}"
+            continue
+
+    raise Exception(f"All providers failed. Last error: {last_error}")
+
+
+# ---------- Agent loop ----------
 
 async def run_agent(user_message: str, history: list, image_b64: str = None) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -396,7 +460,7 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
 
     # Agent loop — up to 10 rounds for deep chaining
     for _ in range(10):
-        response = await call_groq(messages)
+        response = await call_llm(messages)
 
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -441,13 +505,20 @@ class ChatResponse(BaseModel):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    if not GROQ_API_KEY:
-        raise HTTPException(500, "GROQ_API_KEY not configured")
+    if not PROVIDERS:
+        raise HTTPException(500, "No LLM providers configured")
 
-    result = await run_agent(req.message, req.history, image_b64=req.image)
-    return ChatResponse(response=result)
+    try:
+        result = await run_agent(req.message, req.history, image_b64=req.image)
+        return ChatResponse(response=result)
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image", "name_to_handles", "deep_investigate"]}
+    return {
+        "status": "ok",
+        "providers": [p["name"] for p in PROVIDERS],
+        "tools": list(TOOL_MAP.keys()) + ["geolocate_image", "name_to_handles", "deep_investigate"],
+    }
