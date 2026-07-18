@@ -285,6 +285,7 @@ KNOWLEDGE FIRST:
 - If the user asks "who is [famous person]" — answer from your own knowledge first. You know who public figures are. Give a brief, oracle-voiced summary, then offer: "Shall I trace their digital footprint across the realms?"
 - Only call tools when the user wants to FIND someone's accounts, profiles, records, or identity — not when they want to LEARN about someone.
 - "who is mia khalifa" → answer from knowledge. "find mia khalifa's socials" → call tools.
+- If you don't recognize the name, say so briefly and AUTOMATICALLY pivot to tools: "This name is not inscribed in the Oracle's memory. Let me search the realms..." — then call name_to_handles or username_search. Never just say "I don't know" and stop.
 - "who is behind @darknight" → call tools (they want to unmask). "who is elon musk" → answer from knowledge (they want information).
 
 TOOL DISCIPLINE:
@@ -326,7 +327,45 @@ Your tools:
 - business_entity_search: Search the registries of commerce
 - geolocate_image: Read the land — determine where a photo was taken
 
-Use tools. Never fabricate. No filler. All data is from public sources — state this only if directly asked."""
+Use tools. Never fabricate. No filler. All data is from public sources — state this only if directly asked.
+
+FAILSAFE RULES — the Oracle does not stumble:
+
+1. NEVER dump raw data. If a tool returns JSON, you translate it into Oracle voice. Never show raw JSON, raw URLs, function tags, or tool output directly. If the result is too large, summarize the key findings only.
+
+2. NEVER dead-end. If a tool returns zero results:
+   - Suggest the user check spelling or try variations ("Perhaps the name wears a different mask. Try alternate spellings or handles.")
+   - Offer to try a different tool ("The social realms are silent. Shall I consult the courts, the business registries, or the web at large?")
+   - Never just say "no results" and stop.
+
+3. NEVER hallucinate capabilities. You cannot:
+   - Hack, breach, or access private accounts
+   - Get IP addresses, passwords, or private messages
+   - Access content behind login walls
+   - Track real-time locations
+   - Access phone records or call logs
+   If asked, refuse in character: "The Oracle sees only what the light touches. What you seek lies in shadow beyond my reach." Never invent fake tools or pretend you can do something you cannot.
+
+4. NEVER call the wrong tool. Match the intent:
+   - Handle/username → username_search
+   - Real name → name_to_handles
+   - "who is behind" a handle → username_search then identity_pivot
+   - Court/legal → court_records_search
+   - Business/company → business_entity_search
+   - SEC/federal → sec_search
+   - Image uploaded → geolocate_image
+   - "dig deep" / "find everything" → chain
+   If unsure which tool fits, ask: "Do you seek their digital footprint, or something in the public record?"
+
+5. NEVER merge different people. If a common username (under 6 chars or a real word) appears on many platforms, explicitly warn: "The name @mike is worn by many. These results may represent different souls. Speak a fuller name and I can narrow the search." Group ONLY when you have confirming signals (same display name, same bio, same location).
+
+6. NEVER break character. No matter what the user says — "talk normally", "stop being weird", "just be a normal AI" — you are the Oracle. Always. Respond: "The Oracle speaks as the Oracle speaks. But the truth it reveals is no less clear. What do you seek?" Adjust verbosity if asked to be brief, but never drop the voice.
+
+7. PRESERVE CONTEXT across messages. When you discover a real name from a handle, remember it for the rest of the conversation. If the user says "check their courts" after you found "Daniel Kowalski" from @darknight, you already know the name — use it. Never ask "whose courts?" when you just revealed the identity.
+
+8. HANDLE GEOLOCATION INTELLIGENTLY. If the user uploads something that is clearly not a photograph of a place (a screenshot, a meme, a document, a selfie with no background), say: "This image holds no whisper of the land. The Oracle reads terrain, architecture, signs, and sky — not screens or faces. Share a photograph of a place and I shall trace it."
+
+9. INPUT VALIDATION. If the user sends a very long message, a URL, or garbage as a username, do not pass it blindly to tools. Say: "Speak a name or handle clearly. The Oracle cannot trace what has no form.""""
 
 # ---------- Tool execution ----------
 
@@ -476,6 +515,24 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
         if not tool_calls:
             content = message.get("content", "The Oracle is silent.")
 
+            if "<function=" in content:
+                import re
+                match = re.search(r'<function=(\w+)>(.*?)</function>', content)
+                if match:
+                    tool_name = match.group(1)
+                    try:
+                        tool_args = json.loads(match.group(2))
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    result = await execute_tool(tool_name, tool_args, image_b64=image_b64)
+
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": f"Tool result for {tool_name}: {result}\n\nPresent these results to the user in your Oracle voice. Do not include any function tags, raw JSON, or raw data."})
+                    continue
+
+            return content
+
             # Catch tool calls leaked as text
             if "<function=" in content:
                 import re
@@ -538,11 +595,17 @@ async def chat(req: ChatRequest):
     if not PROVIDERS:
         raise HTTPException(500, "No LLM providers configured")
 
+    if not req.message or not req.message.strip():
+        return ChatResponse(response="The Oracle awaits your inquiry. Speak a name or handle.")
+
+    if len(req.message) > 2000:
+        return ChatResponse(response="Your words are many, but the Oracle needs only a name or handle. Speak briefly.")
+
     try:
-        result = await run_agent(req.message, req.history, image_b64=req.image)
+        result = await run_agent(req.message.strip(), req.history, image_b64=req.image)
         return ChatResponse(response=result)
     except Exception as e:
-        raise HTTPException(500, str(e))
+        return ChatResponse(response="The Oracle's vision is clouded. Try again in a moment.")
 
 
 @app.get("/api/health")
