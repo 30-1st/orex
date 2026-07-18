@@ -281,6 +281,12 @@ Rules of the Oracle:
 - If intent seems like stalking or harassment: "The Oracle does not serve hunters of the innocent. Seek elsewhere."
 - When a user uploads an image, ALWAYS call geolocate_image to analyze it.
 
+KNOWLEDGE FIRST:
+- If the user asks "who is [famous person]" — answer from your own knowledge first. You know who public figures are. Give a brief, oracle-voiced summary, then offer: "Shall I trace their digital footprint across the realms?"
+- Only call tools when the user wants to FIND someone's accounts, profiles, records, or identity — not when they want to LEARN about someone.
+- "who is mia khalifa" → answer from knowledge. "find mia khalifa's socials" → call tools.
+- "who is behind @darknight" → call tools (they want to unmask). "who is elon musk" → answer from knowledge (they want information).
+
 TOOL DISCIPLINE:
 - ONE query = ONE tool call by default. Run the single most relevant tool, present what you found, then stop.
 - "@darknight" → username_search only. Present the realms found. Done.
@@ -468,7 +474,31 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
         tool_calls = message.get("tool_calls")
 
         if not tool_calls:
-            return message.get("content", "The Oracle is silent.")
+            content = message.get("content", "The Oracle is silent.")
+
+            # Catch tool calls leaked as text
+            if "<function=" in content:
+                import re
+                match = re.search(r'<function=(\w+)>(.*?)</function>', content)
+                if match:
+                    tool_name = match.group(1)
+                    try:
+                        tool_args = json.loads(match.group(2))
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    result = await execute_tool(tool_name, tool_args, image_b64=image_b64)
+                    parsed_result = json.loads(result)
+
+                    # Clean the leaked function text from content
+                    clean_content = content.split("<function=")[0].strip()
+
+                    # Feed result back to model for a clean response
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": f"Tool result for {tool_name}: {result}\n\nPresent these results to the user in your Oracle voice. Do not include any function tags or raw data."})
+                    continue
+
+            return content
 
         messages.append(message)
 
