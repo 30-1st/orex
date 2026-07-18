@@ -490,12 +490,28 @@ async def call_llm(messages: list, use_tools: bool = True) -> dict:
 
                 print(f"OREX PROVIDER {provider['name']}: {resp.status_code} - {resp.text[:500]}")
 
+                # Handle Groq's tool_use_failed — model leaked function as text
+                if resp.status_code == 400:
+                    try:
+                        err = resp.json()
+                        failed = err.get("error", {}).get("failed_generation", "")
+                        if failed and "<function=" in failed:
+                            # Return a fake successful response so the agent loop can handle it
+                            return {
+                                "choices": [{
+                                    "message": {
+                                        "content": failed,
+                                    }
+                                }]
+                            }
+                    except Exception:
+                        pass
+
                 # Rate limited or server error — try next provider
                 if resp.status_code in (429, 500, 502, 503, 504):
                     last_error = f"{provider['name']} returned {resp.status_code}"
                     continue
 
-                # Other client errors — don't retry, something is wrong with the request
                 last_error = f"{provider['name']} returned {resp.status_code}"
                 break
 
