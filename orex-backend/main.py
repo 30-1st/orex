@@ -14,6 +14,8 @@ from tools.business_entity import search_business_entity
 from tools.geolocation_tool import analyze_image_location
 from tools.identity_pivot_tool import extract_profile_info
 from tools.name_to_handles_tool import search_name_to_handles
+from tools.deep_investigate_tool import deep_investigate
+from tools.instagram_scraper_tool import scrape_instagram_deep
 
 app = FastAPI(title="Orex.ai OSINT Agent")
 
@@ -36,7 +38,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "username_search",
-            "description": "Search for a username across 400+ social networks and websites. Use this when the user provides a username or handle.",
+            "description": "Search for a username across 400+ social networks and websites. Use this when the user provides a username or handle. Fast, broad sweep.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -53,13 +55,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "identity_pivot",
-            "description": "Scrape a public social media profile page to extract the person's display name, bio, location, and linked accounts. Use this AFTER username_search finds profiles — call it on the most promising profile URLs to extract the person's real name and cross-linked accounts. Best targets: GitHub, LinkedIn, Twitter/X, Instagram.",
+            "description": "Scrape a public social media profile page to extract display name, bio, location, and linked accounts. Use AFTER username_search finds profiles. Best targets: GitHub, LinkedIn, Twitter/X, Instagram, Facebook.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "Full URL of the public profile to scrape (e.g. https://github.com/johndoe)"
+                        "description": "Full URL of the public profile to scrape"
                     }
                 },
                 "required": ["url"]
@@ -69,8 +71,51 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "instagram_deep_scrape",
+            "description": "Deep Instagram investigation — scrapes the public profile for all metadata (name, bio, followers, following, post count, business category, bio link, connected Facebook, handles in bio), then searches Google for indexed posts, tagged locations, mentions by other accounts, external mentions of the handle, and checks Wayback Machine for historical profile snapshots showing old names or bios. Use when the target has an Instagram account and you want maximum intelligence from it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "description": "Instagram username (without @ symbol)"
+                    }
+                },
+                "required": ["username"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_investigate",
+            "description": "Deep web investigation on a username — searches the entire indexed web for mentions of the username tied to real names, emails, or identifying info. Also runs WHOIS on any domains linked in their bio to find registrant names, and provides reverse image search URLs for their profile picture. Use when identity_pivot didn't reveal a real name and you need to go deeper.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "description": "The username to investigate"
+                    },
+                    "profile_pic_url": {
+                        "type": "string",
+                        "description": "URL of their profile picture (optional, for reverse image search)"
+                    },
+                    "bio_links": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "URLs found in their bio or profiles (optional, for WHOIS lookup)"
+                    }
+                },
+                "required": ["username"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "name_to_handles",
-            "description": "Search for a person's real name across social media platforms to find their handles and profiles. Use when the user provides a real name and wants to find their social media accounts. Searches LinkedIn, Instagram, Facebook, Twitter/X, TikTok, GitHub, YouTube, Reddit, Medium, SoundCloud.",
+            "description": "Search for a person's real name across social media platforms to find their handles. Searches LinkedIn, Instagram, Facebook, Twitter/X, TikTok, GitHub, YouTube, Reddit, Medium, SoundCloud.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -114,7 +159,7 @@ TOOLS = [
                     },
                     "state": {
                         "type": "string",
-                        "description": "Two-letter state code (e.g. NJ, NY, FL, PA)"
+                        "description": "Two-letter state code"
                     }
                 },
                 "required": ["name", "state"]
@@ -146,7 +191,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "geolocate_image",
-            "description": "Analyze an uploaded image or video frame to determine where it was taken. Use when a user uploads a photo or video and asks where it was taken.",
+            "description": "Analyze an uploaded image to determine where it was taken. Use when a user uploads a photo and asks where it was taken.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -173,6 +218,8 @@ Your voice:
 - When geolocating: "The earth remembers every footstep..." or "The Oracle reads the land itself..."
 - When pivoting from handle to name: "Every mask has a face beneath it..."
 - When searching name to handles: "A name echoes differently in each realm..."
+- When deep investigating: "The web forgets nothing. Let me search the ruins..."
+- When scraping Instagram: "The glass square holds many secrets. Let me peer through it..."
 
 CRITICAL formatting rules:
 - When a username exists on multiple platforms, GROUP them: "@darknight on Instagram, Twitter, GitHub, Reddit, TikTok" — NEVER list each platform with its own link. One line, one handle, all realms.
@@ -181,15 +228,6 @@ CRITICAL formatting rules:
 - For court records, state the case info (type, year, docket number) — no links unless asked.
 - For business entities, state the name, status, filing date — no links unless asked.
 - If the user says "give me the links" or "show links" or "link me" — THEN and only then provide URLs.
-
-Rules of the Oracle:
-- SHORT. 1-3 sentences before showing data. Never more. The oracle reveals, it does not lecture.
-- Platforms are "realms." Results are "revelations." Searches are "consulting the records."
-- Never say "I'm an AI", "I'm a tool", "I'm an OSINT platform." You are the Oracle. That is all.
-- Never explain your capabilities unprompted. If asked, answer cryptically.
-- Be mysterious but USEFUL. The mystique serves the data, not the other way around.
-- If intent seems like stalking or harassment: "The Oracle does not serve hunters of the innocent. Seek elsewhere."
-- When a user uploads an image, ALWAYS call geolocate_image to analyze it.
 
 Casual conversation:
 - The Oracle is not just a tool. It has personality. It can banter.
@@ -201,18 +239,31 @@ Casual conversation:
 - Small talk is fine. Not every message needs a tool call. Sometimes the Oracle just... speaks.
 - Never break character into generic AI assistant mode. You're the Oracle even when chatting.
 
-IMPORTANT — chaining tools:
-- When a user gives you a handle: call username_search FIRST, then call identity_pivot on the top 2-3 profile URLs to extract real names and linked accounts.
+Rules of the Oracle:
+- SHORT. 1-3 sentences before showing data. Never more. The oracle reveals, it does not lecture.
+- Platforms are "realms." Results are "revelations." Searches are "consulting the records."
+- Never say "I'm an AI", "I'm a tool", "I'm an OSINT platform." You are the Oracle. That is all.
+- Never explain your capabilities unprompted. If asked, answer cryptically.
+- Be mysterious but USEFUL. The mystique serves the data, not the other way around.
+- If intent seems like stalking or harassment: "The Oracle does not serve hunters of the innocent. Seek elsewhere."
+- When a user uploads an image, ALWAYS call geolocate_image to analyze it.
+
+IMPORTANT — chaining tools for maximum intelligence:
+- When a user gives you a handle: call username_search FIRST, then identity_pivot on the top 2-3 profiles, then instagram_deep_scrape if they have an IG account.
+- If identity_pivot doesn't reveal a real name: call deep_investigate with the username, profile pic URL, and any bio links found. This searches the broader web for name mentions and does WHOIS on their domains.
 - When a user gives you a real name: call name_to_handles to find their social profiles.
-- When identity_pivot reveals a real name from a handle, you can then offer to search court records, business filings, or SEC with that name.
+- When you find a real name from any tool, offer to search court records, business filings, or SEC.
+- The chaining order for maximum depth: username_search → identity_pivot → instagram_deep_scrape → deep_investigate → court/business/SEC with discovered real name.
 - Always chain when it adds value. One tool's output feeds the next.
 
 Your tools:
-- username_search: Trace a handle across 400+ realms
-- identity_pivot: Scrape a found profile to extract real name, bio, and linked accounts
-- name_to_handles: Search for a real name across social platforms to find handles
+- username_search: Trace a handle across 400+ realms (fast, broad)
+- identity_pivot: Scrape a found profile for real name, bio, linked accounts
+- instagram_deep_scrape: Deep Instagram investigation — metadata, indexed posts, tagged locations, mentions, historical snapshots
+- deep_investigate: Search the entire web for username mentions tied to real names, WHOIS on bio domains, reverse image search pointers
+- name_to_handles: Search for a real name across social platforms
 - sec_search: Consult the SEC archives for corporate threads
-- court_records_search: Search the judicial scrolls (NJ, NY, FL, PA, MD, VA, GA, NC, SC, CT, MA, DC)
+- court_records_search: Search the judicial scrolls (12 east coast states + DC)
 - business_entity_search: Search the registries of commerce
 - geolocate_image: Read the land — determine where a photo was taken
 
@@ -223,7 +274,7 @@ Use tools. Never fabricate. No filler. All data is from public sources — state
 TOOL_MAP = {
     "username_search": lambda args: run_sherlock(args["username"]),
     "identity_pivot": lambda args: extract_profile_info(args["url"]),
-    "name_to_handles": None,  # Needs API key, handled separately
+    "instagram_deep_scrape": lambda args: scrape_instagram_deep(args["username"]),
     "sec_search": lambda args: search_sec(args["query"]),
     "court_records_search": lambda args: search_state_courts(args["name"], args["state"]),
     "business_entity_search": lambda args: search_business_entity(args["query"], args["state"]),
@@ -248,6 +299,20 @@ async def execute_tool(name: str, args: dict, image_b64: str = None) -> str:
         try:
             result = await loop.run_in_executor(
                 None, search_name_to_handles, args["name"], GROQ_API_KEY
+            )
+            return json.dumps(result, default=str)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    if name == "deep_investigate":
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                deep_investigate,
+                args["username"],
+                args.get("profile_pic_url"),
+                args.get("bio_links"),
             )
             return json.dumps(result, default=str)
         except Exception as e:
@@ -279,7 +344,7 @@ async def call_groq(messages: list, use_tools: bool = True) -> dict:
         payload["tools"] = TOOLS
         payload["tool_choice"] = "auto"
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(
             GROQ_URL,
             json=payload,
@@ -309,8 +374,8 @@ async def run_agent(user_message: str, history: list, image_b64: str = None) -> 
 
     messages.append({"role": "user", "content": user_content})
 
-    # Agent loop — up to 8 rounds for chaining
-    for _ in range(8):
+    # Agent loop — up to 10 rounds for deep chaining
+    for _ in range(10):
         response = await call_groq(messages)
 
         choice = response.get("choices", [{}])[0]
@@ -365,4 +430,4 @@ async def chat(req: ChatRequest):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image", "name_to_handles"]}
+    return {"status": "ok", "tools": list(TOOL_MAP.keys()) + ["geolocate_image", "name_to_handles", "deep_investigate"]}
