@@ -38,7 +38,7 @@ if _di_key:
         "name": "deepinfra",
         "url": "https://api.deepinfra.com/v1/openai/chat/completions",
         "key": _di_key,
-        "model": "meta-llama/Llama-3.3-70B-Instruct",
+        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     })
 
 # Fallback: Groq (fastest inference)
