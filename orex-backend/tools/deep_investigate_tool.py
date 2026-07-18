@@ -4,7 +4,7 @@ import httpx
 from urllib.parse import quote
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
@@ -13,8 +13,9 @@ def deep_investigate(username: str, profile_pic_url: str = None, bio_links: list
     """
     Deep investigation on a username:
     1. Google dork across the web for real name mentions tied to the username
-    2. WHOIS lookup on any domains linked in bio
-    3. Reverse image search pointers for profile picture
+    2. Dating app profile discovery
+    3. WHOIS lookup on any domains linked in bio
+    4. Reverse image search pointers for profile picture
     """
 
     clean = re.sub(r"[^a-zA-Z0-9._-]", "", username.strip().lstrip("@"))
@@ -24,36 +25,54 @@ def deep_investigate(username: str, profile_pic_url: str = None, bio_links: list
     result = {
         "username": clean,
         "web_mentions": [],
+        "dating_profiles": [],
         "whois_results": [],
         "reverse_image": None,
     }
 
-    # ──── 1. Google dorking via DuckDuckGo ────
+    # ──── 1. Identity dorking ────
     dork_queries = [
-        # Username mentioned alongside real names
         f'"{clean}" real name',
         f'"{clean}" name is',
         f'"{clean}" known as',
-        # Username on forums, blogs, articles
         f'"{clean}" -site:instagram.com -site:twitter.com -site:tiktok.com',
-        # Username in context that reveals identity
         f'"{clean}" photographer OR artist OR developer OR engineer OR designer',
-        # Username mentioned in news, articles, interviews
         f'"{clean}" interview OR article OR featured OR profile',
-        # Username on identity-revealing platforms
         f'"{clean}" site:linkedin.com OR site:facebook.com',
-        # Username linked to email addresses
         f'"{clean}" "@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com"',
+        # Forum/community posts where people use real names
+        f'"{clean}" "my name is" OR "I\'m" OR "call me"',
+        # Portfolio/personal sites
+        f'"{clean}" portfolio OR resume OR CV OR "about me"',
     ]
 
     for query in dork_queries:
         mentions = _search_duckduckgo(query)
         for m in mentions:
-            # Avoid duplicates
             if not any(existing["url"] == m["url"] for existing in result["web_mentions"]):
                 result["web_mentions"].append(m)
 
-    # ──── 2. WHOIS on bio links ────
+    # ──── 2. Dating app discovery ────
+    dating_queries = [
+        # Direct platform searches
+        f'"{clean}" site:tinder.com OR site:bumble.com OR site:hinge.co',
+        f'"{clean}" site:match.com OR site:okcupid.com OR site:pof.com',
+        f'"{clean}" site:zoosk.com OR site:eharmony.com OR site:coffee-meets-bagel.com',
+        # Indexed dating profile pages
+        f'"{clean}" "looking for" "relationship" tinder OR bumble OR hinge',
+        # Username referenced with dating context
+        f'"{clean}" "swipe right" OR "matched with" OR "my profile"',
+        # Reviews/screenshots of dating profiles shared online
+        f'"{clean}" dating profile OR dating app',
+    ]
+
+    for query in dating_queries:
+        mentions = _search_duckduckgo(query)
+        for m in mentions:
+            if not any(existing["url"] == m["url"] for existing in result["dating_profiles"]):
+                result["dating_profiles"].append(m)
+
+    # ──── 3. WHOIS on bio links ────
     if bio_links:
         for link in bio_links[:3]:
             domain = _extract_domain(link)
@@ -62,7 +81,7 @@ def deep_investigate(username: str, profile_pic_url: str = None, bio_links: list
                 if whois_data:
                     result["whois_results"].append(whois_data)
 
-    # ──── 3. Reverse image search ────
+    # ──── 4. Reverse image search ────
     if profile_pic_url:
         result["reverse_image"] = {
             "note": "Profile picture URL available for reverse image search",
@@ -80,6 +99,7 @@ def deep_investigate(username: str, profile_pic_url: str = None, bio_links: list
         }
 
     result["total_web_mentions"] = len(result["web_mentions"])
+    result["total_dating_hits"] = len(result["dating_profiles"])
 
     return result
 
@@ -108,7 +128,6 @@ def _search_duckduckgo(query: str) -> list:
         )
 
         for url, title, snippet in matches[:5]:
-            # Clean DDG redirect URLs
             if "uddg=" in url:
                 m = re.search(r"uddg=([^&]+)", url)
                 if m:
@@ -132,11 +151,9 @@ def _search_duckduckgo(query: str) -> list:
 
 
 def _extract_domain(url: str) -> str | None:
-    """Extract root domain from a URL."""
     m = re.search(r"https?://(?:www\.)?([^/]+)", url)
     if m:
         domain = m.group(1)
-        # Skip IP addresses
         if re.match(r"\d+\.\d+\.\d+\.\d+", domain):
             return None
         return domain
@@ -144,7 +161,6 @@ def _extract_domain(url: str) -> str | None:
 
 
 def _is_social_domain(domain: str) -> bool:
-    """Check if a domain is a known social media platform (skip WHOIS for these)."""
     social = [
         "instagram.com", "twitter.com", "x.com", "facebook.com",
         "tiktok.com", "linkedin.com", "youtube.com", "reddit.com",
@@ -157,9 +173,7 @@ def _is_social_domain(domain: str) -> bool:
 
 
 def _whois_lookup(domain: str) -> dict | None:
-    """Look up WHOIS data for a domain to find registrant info."""
     try:
-        # Use a free WHOIS API
         resp = httpx.get(
             f"https://rdap.org/domain/{domain}",
             headers={"Accept": "application/rdap+json"},
@@ -173,7 +187,6 @@ def _whois_lookup(domain: str) -> dict | None:
         data = resp.json()
         result = {"domain": domain}
 
-        # Extract registrant/contact info
         entities = data.get("entities", [])
         for entity in entities:
             roles = entity.get("roles", [])
@@ -200,7 +213,6 @@ def _whois_lookup(domain: str) -> dict | None:
                             if email and "@" in email and "privacy" not in email.lower() and "redacted" not in email.lower():
                                 result["registrant_email"] = email
 
-        # Extract registration dates
         events = data.get("events", [])
         for event in events:
             if event.get("eventAction") == "registration":
@@ -208,7 +220,6 @@ def _whois_lookup(domain: str) -> dict | None:
             elif event.get("eventAction") == "expiration":
                 result["expiry_date"] = event.get("eventDate", "")
 
-        # Only return if we found something useful beyond just the domain
         if len(result) > 1:
             return result
 
