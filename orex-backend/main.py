@@ -627,6 +627,7 @@ async def chat(req: ChatRequest):
         result = await run_agent(req.message.strip(), req.history, image_b64=req.image)
         return ChatResponse(response=result)
     except Exception as e:
+        print(f"OREX ERROR: {str(e)}")
         return ChatResponse(response="The Oracle's vision is clouded. Try again in a moment.")
 
 
